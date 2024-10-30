@@ -4,12 +4,11 @@ import re
 import json
 import requests
 import traceback
+import utils
+from plan import Plan
 
-from goat_storytelling_agent import utils
-from goat_storytelling_agent.plan import Plan
 
-
-SUPPORTED_BACKENDS = ["hf", "llama.cpp"]
+SUPPORTED_BACKENDS = ["hf", "llama.cpp", "openai"]
 
 
 def generate_prompt_parts(
@@ -67,6 +66,79 @@ def _query_chat_hf(endpoint, messages, tokenizer, retries=3,
     else:
         return ''
 
+
+def _query_chat_openai(endpoint, messages, retries=3,
+                      request_timeout=600, max_tokens=4096,
+                      extra_options={'model': 'gpt-3.5-turbo', 'api_key': '123'}):
+    endpoint = endpoint.rstrip('/')
+    if 'api_key' not in extra_options or not extra_options['api_key']:
+        raise ValueError("OpenAI API key must be provided in extra_options")
+    
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f"Bearer {extra_options['api_key']}"
+    }
+    
+    # Use the messages directly instead of generate_prompt_parts
+    # OpenAI already expects the role-based format
+    api_messages = []
+    for message in messages:
+        api_messages.append({
+            "role": message["role"],
+            "content": message["content"]
+        })
+
+    data = {
+        "model": extra_options.get('model', 'gpt-3.5-turbo'),
+        "messages": api_messages,
+        "max_tokens": max_tokens
+    }
+    
+    # Add any additional OpenAI parameters from extra_options
+    for key, value in extra_options.items():
+        if key not in ['model', 'api_key']:
+            data[key] = value
+
+    while retries > 0:
+        try:
+            print(f"\n\n========== Submitting request to OpenAI: >>\n{json.dumps(data, indent=2)}")
+            sys.stdout.flush()
+            
+            response = requests.post(
+                f"{endpoint}/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=request_timeout
+            )
+            
+            response_json = response.json()
+            print(f"\n========== Received response from OpenAI: >>\n{json.dumps(response_json, indent=2)}")
+            sys.stdout.flush()
+            
+            # Check for API errors
+            if 'error' in response_json:
+                raise Exception(f"OpenAI API error: {response_json['error']}")
+            
+            # Check if response has expected structure
+            if not response_json.get('choices') or len(response_json['choices']) == 0:
+                raise Exception("No choices in OpenAI response")
+                
+            generated_text = response_json['choices'][0]['message']['content']
+            
+            if messages and messages[-1]["role"] == "assistant":
+                result_prefix = messages[-1]["content"]
+                generated_text = result_prefix + generated_text
+                
+            return generated_text
+            
+        except Exception:
+            traceback.print_exc()
+            print('Error occurred, retrying...')
+            retries -= 1
+            time.sleep(5)
+    
+    return ''
+    
 
 def _query_chat_llamacpp(endpoint, messages, retries=3, request_timeout=120,
                          max_tokens=4096, extra_options={}):
@@ -142,7 +214,7 @@ class StoryAgent:
                 "GOAT-AI/GOAT-70B-Storytelling")
 
         if prompt_engine is None:
-            from goat_storytelling_agent import prompts
+            import prompts
             self.prompt_engine = prompts
         else:
             self.prompt_engine = prompt_engine
@@ -167,6 +239,11 @@ class StoryAgent:
                 self.backend_uri, messages, retries=retries,
                 request_timeout=self.request_timeout,
                 max_tokens=self.max_tokens, extra_options=self.extra_options)
+        elif self.backend == "openai":
+            result = _query_chat_openai(
+                self.backend_uri, messages, retries=retries,
+                request_timeout=self.request_timeout,
+                max_tokens=self.max_tokens)
         return result
 
     def parse_book_spec(self, text_spec):
@@ -285,6 +362,10 @@ class StoryAgent:
             text_plan = self.query_chat(messages)
             if text_plan:
                 plan = Plan.parse_text_plan(text_plan)
+                # Validate one act with exactly 4 chapters
+                if len(plan) == 1 and len(plan[0]['chapters']) == 4:
+                    break
+                plan = []
         return messages, plan
 
     def enhance_plot_chapters(self, book_spec, plan):
@@ -295,7 +376,7 @@ class StoryAgent:
         book_spec : str
             Book specification
         plan : Dict
-            Dict with book plan
+            Dict with book plannn
 
         Returns
         -------
@@ -305,164 +386,125 @@ class StoryAgent:
             Dict with updated book plan
         """
         text_plan = Plan.plan_2_str(plan)
-        all_messages = []
-        for act_num in range(3):
-            messages = self.prompt_engine.enhance_plot_chapters_messages(
-                act_num, text_plan, book_spec, self.form)
-            act = self.query_chat(messages)
-            if act:
+        messages = self.prompt_engine.enhance_plot_chapters_messages(
+            0, text_plan, book_spec, self.form)  # Always act 0 since we only have one act
+        act = self.query_chat(messages)
+        all_messages = [messages]
+    
+        if act:
+            act_dict = Plan.parse_act(act)
+            # Keep querying until we get exactly 4 chapters
+            while len(act_dict['chapters']) != 4:
+                act = self.query_chat(messages)
                 act_dict = Plan.parse_act(act)
-                while len(act_dict['chapters']) < 2:
-                    act = self.query_chat(messages)
-                    act_dict = Plan.parse_act(act)
-                else:
-                    plan[act_num] = act_dict
-                text_plan = Plan.plan_2_str(plan)
-            all_messages.append(messages)
+            plan[0] = act_dict
+        
         return all_messages, plan
 
-    def split_chapters_into_scenes(self, plan):
-        """Creates a by-scene breakdown of all chapters
-
-        Parameters
-        ----------
-        plan : Dict
-            Dict with book plan
-
-        Returns
-        -------
-        List[Dict]
-            Used messages for logging
-        dict
-            Dict with updated book plan
-        """
+    def split_chapters_into_scenes(self, plan, book_spec):  # Added book_spec parameter
         all_messages = []
         act_chapters = {}
-        for i, act in enumerate(plan, start=1):
-            text_act, chs = Plan.act_2_str(plan, i)
-            act_chapters[i] = chs
-            messages = self.prompt_engine.split_chapters_into_scenes_messages(
-                i, text_act, self.form)
-            act_scenes = self.query_chat(messages)
-            act['act_scenes'] = act_scenes
-            all_messages.append(messages)
+    
+        # Modified to handle only one act
+        i = 1  # Act 1
+        act = plan[0]
+        text_act, chs = Plan.act_2_str(plan, i)
+        act_chapters[i] = chs[:4]  # Limit to 4 chapters
+        messages = self.prompt_engine.split_chapters_into_scenes_messages(
+            i, text_act, self.form, book_spec)  # Added book_spec
+        act_scenes = self.query_chat(messages)
+        act['act_scenes'] = act_scenes
+        all_messages.append(messages)
 
-        for i, act in enumerate(plan, start=1):
-            act_scenes = act['act_scenes']
-            act_scenes = re.split(r'Chapter (\d+)', act_scenes.strip())
+        # Process scenes for the single act
+        act_scenes = act['act_scenes']
+        act_scenes = re.split(r'Chapter (\d+)', act_scenes.strip())
 
-            act['chapter_scenes'] = {}
-            chapters = [text.strip() for text in act_scenes[:]
-                        if (text and text.strip())]
-            current_ch = None
-            merged_chapters = {}
-            for snippet in chapters:
-                if snippet.isnumeric():
-                    ch_num = int(snippet)
-                    if ch_num != current_ch:
-                        current_ch = snippet
-                        merged_chapters[ch_num] = ''
-                    continue
-                if merged_chapters:
-                    merged_chapters[ch_num] += snippet
-            ch_nums = list(merged_chapters.keys()) if len(
-                merged_chapters) <= len(act_chapters[i]) else act_chapters[i]
-            merged_chapters = {ch_num: merged_chapters[ch_num]
-                               for ch_num in ch_nums}
-            for ch_num, chapter in merged_chapters.items():
-                scenes = re.split(r'Scene \d+.{0,10}?:', chapter)
-                scenes = [text.strip() for text in scenes[1:]
-                          if (text and (len(text.split()) > 3))]
-                if not scenes:
-                    continue
-                act['chapter_scenes'][ch_num] = scenes
+        act['chapter_scenes'] = {}
+        chapters = [text.strip() for text in act_scenes[:]
+                    if (text and text.strip())]
+        current_ch = None
+        merged_chapters = {}
+        for snippet in chapters:
+            if snippet.isnumeric():
+                ch_num = int(snippet)
+                if ch_num != current_ch and ch_num <= 4:  # Only process first 4 chapters
+                    current_ch = snippet
+                    merged_chapters[ch_num] = ''
+                continue
+            if merged_chapters and current_ch and int(current_ch) <= 4:
+                merged_chapters[ch_num] += snippet
+        ch_nums = [i for i in range(1, 5)]  # Always use chapters 1-4
+        merged_chapters = {ch_num: merged_chapters.get(ch_num, '')
+                            for ch_num in ch_nums}
+        for ch_num, chapter in merged_chapters.items():
+            scenes = re.split(r'Scene \d+.{0,10}?:', chapter)
+            scenes = [text.strip() for text in scenes[1:]
+                        if (text and (len(text.split()) > 3))]
+            if not scenes:
+                continue
+            act['chapter_scenes'][ch_num] = scenes
+    
         return all_messages, plan
 
     @staticmethod
     def prepare_scene_text(text):
+        if not text:
+            return ""
+        
         lines = text.split('\n')
-        ch_ids = [i for i in range(5)
-                  if 'Chapter ' in lines[i]]
+        if not lines:
+            return ""
+        
+        # Find last "Chapter" marker in the beginning
+        ch_ids = [i for i, line in enumerate(lines[:min(5, len(lines))])
+                  if 'Chapter ' in line]
         if ch_ids:
             lines = lines[ch_ids[-1]+1:]
-        sc_ids = [i for i in range(5)
-                  if 'Scene ' in lines[i]]
-        if sc_ids:
-            lines = lines[sc_ids[-1]+1:]
-
+        
+        # Find last "Scene" marker in the beginning
+        if lines:  # Check if we still have lines after previous operation
+            sc_ids = [i for i, line in enumerate(lines[:min(5, len(lines))])
+                      if 'Scene ' in line]
+            if sc_ids:
+                lines = lines[sc_ids[-1]+1:]
+            
+        # Find first occurrence of Chapter/Scene marker in the rest of the text
         placeholder_i = None
-        for i in range(len(lines)):
-            if lines[i].startswith('Chapter ') or lines[i].startswith('Scene '):
-                placeholder_i = i
-                break
-        if placeholder_i is not None:
-            lines = lines[:i]
-
+        if lines:  # Check if we still have lines
+            for i, line in enumerate(lines):
+                if line.startswith('Chapter ') or line.startswith('Scene '):
+                    placeholder_i = i
+                    break
+                
+            if placeholder_i is not None:
+                lines = lines[:placeholder_i]
+            
         text = '\n'.join(lines)
-        return text
+        return text.strip()
+    
 
     def write_a_scene(
-            self, scene, sc_num, ch_num, plan, previous_scene=None):
-        """Generates a scene text for a form
-
-        Parameters
-        ----------
-        scene : str
-            Scene description
-        sc_num : int
-            Scene number
-        ch_num : int
-            Chapter number
-        plan : Dict
-            Dict with book plan
-        previous_scene : str, optional
-            Previous scene text, by default None
-
-        Returns
-        -------
-        List[Dict]
-            Used messages for logging
-        str
-            Generated scene text
-        """
+            self, scene, sc_num, ch_num, plan, book_spec,  # Added book_spec parameter
+            previous_scene=None):
         text_plan = Plan.plan_2_str(plan)
         messages = self.prompt_engine.scene_messages(
-            scene, sc_num, ch_num, text_plan, self.form)
+            scene, sc_num, ch_num, text_plan, self.form, book_spec)  # Added book_spec
         if previous_scene:
             previous_scene = utils.keep_last_n_words(previous_scene,
-                                                     n=self.n_crop_previous)
+                                                        n=self.n_crop_previous)
             messages[1]['content'] += f'{self.prompt_engine.prev_scene_intro}\"\"\"{previous_scene}\"\"\"'
         generated_scene = self.query_chat(messages)
         generated_scene = self.prepare_scene_text(generated_scene)
         return messages, generated_scene
 
+
     def continue_a_scene(self, scene, sc_num, ch_num,
-                         plan, current_scene=None):
-        """Continues a scene text for a form
-
-        Parameters
-        ----------
-        scene : str
-            Scene description
-        sc_num : int
-            Scene number
-        ch_num : int
-            Chapter number
-        plan : Dict
-            Dict with book plan
-        current_scene : str, optional
-            Text of the current scene so far, by default None
-
-        Returns
-        -------
-        List[Dict]
-            Used messages for logging
-        str
-            Generated scene continuation text
-        """
+                         plan, book_spec,  # Added book_spec parameter
+                         current_scene=None):
         text_plan = Plan.plan_2_str(plan)
         messages = self.prompt_engine.scene_messages(
-            scene, sc_num, ch_num, text_plan, self.form)
+            scene, sc_num, ch_num, text_plan, self.form, book_spec)  # Added book_spec
         if current_scene:
             current_scene = utils.keep_last_n_words(current_scene,
                                                     n=self.n_crop_previous)
@@ -471,22 +513,27 @@ class StoryAgent:
         generated_scene = self.prepare_scene_text(generated_scene)
         return messages, generated_scene
 
+
     def generate_story(self, topic):
         """Example pipeline for a novel creation"""
         _, book_spec = self.init_book_spec(topic)
         _, book_spec = self.enhance_book_spec(book_spec)
         _, plan = self.create_plot_chapters(book_spec)
         _, plan = self.enhance_plot_chapters(book_spec, plan)
-        _, plan = self.split_chapters_into_scenes(plan)
+        _, plan = self.split_chapters_into_scenes(plan, book_spec)  # Added book_spec
 
         form_text = []
-        for act in plan:
-            for ch_num, chapter in act['chapter_scenes'].items():
+        # Modified to handle only one act with 4 chapters
+        act = plan[0]
+        for ch_num in range(1, 5):  # Always process chapters 1-4
+            if ch_num in act['chapter_scenes']:
+                chapter = act['chapter_scenes'][ch_num]
                 sc_num = 1
                 for scene in chapter:
                     previous_scene = form_text[-1] if form_text else None
                     _, generated_scene = self.write_a_scene(
                         scene, sc_num, ch_num, plan,
+                        book_spec,  # Added book_spec
                         previous_scene=previous_scene)
                     form_text.append(generated_scene)
                     sc_num += 1

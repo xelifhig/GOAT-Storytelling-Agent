@@ -62,42 +62,56 @@ def enhance_book_spec_messages(book_spec, form):
 def create_plot_chapters_messages(book_spec, form):
     messages = [
         {"role": "user", "content": (
-            f"Come up with a plot for a bestseller-grade {form} in 3 acts taking inspiration from its description. "
-            "Break down the plot into chapters using the following structure:\nActs\n- Chapters\n\n"
-            f"Early {form} description:\n\"\"\"{book_spec}\"\"\".")}
+            f"Come up with a plot for a bestseller-grade {form} in exactly 1 act with exactly 4 chapters based on this specification:\n\"\"\"{book_spec}\"\"\"\n\n"
+            "Break down the plot into chapters using the following structure:\nAct 1\n- Exactly Four Chapters\n"
+            "Ensure all chapters are directly connected to the main premise and theme.")}
     ]
     return messages
 
 
 def enhance_plot_chapters_messages(act_num, text_plan, book_spec, form):
-    act_num += 1
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": f"Come up with a plot for a bestseller-grade {form} in 3 acts. Break down the plot into chapters using the following structure:\nActs\n- Chapters\n\nEarly {form} description:\n\"\"\"{book_spec}\"\"\""},
-        {"role": "assistant", "content": text_plan},
-        {"role": "user", "content": f"Take Act {act_num}. Rewrite the plan so that chapter's story value alternates (i.e. if Chapter 1 is positive, Chapter 2 is negative, and so on). Describe only concrete events and actions (who did what). Make it very short (one brief sentence and value charge indication per chapter)"}
-    ]
-    return messages
-
-
-def split_chapters_into_scenes_messages(act_num, text_act, form):
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": (
-            f"Break each chapter in Act {act_num} into scenes (number depends on how packed a chapter is), give scene specifications for each.\n"
-            f"Here is the by-chapter plot summary for the act in a {form}:\n\"\"\"{text_act}\"\"\"\n\n"
-            f"Scene spec format:\n\"\"\"{scene_spec_format}\"\"\"")}
+            f"Based on this book specification:\n\"\"\"{book_spec}\"\"\"\n\n"
+            f"Come up with a plot for a bestseller-grade {form} in exactly 1 act with exactly 4 chapters. "
+            "Break down the plot into chapters using the following structure:\nAct 1\n- Exactly Four Chapters\n"
+            "Ensure each chapter directly relates to the main premise and theme.")},
+        {"role": "assistant", "content": text_plan},
+        {"role": "user", "content": (
+            "Rewrite the plan for Act 1 so that chapter's story value alternates (i.e. if Chapter 1 is positive, Chapter 2 is negative, and so on). "
+            "Describe only concrete events and actions (who did what). Make it very short (one brief sentence and value charge indication per chapter). "
+            "Ensure there are exactly 4 chapters and each chapter clearly connects to the book's premise.")}
     ]
     return messages
 
 
-def scene_messages(scene, sc_num, ch_num, text_plan, form):
+def split_chapters_into_scenes_messages(act_num, text_act, form, book_spec):  # Added book_spec parameter
     messages = [
-        {"role": "system", "content": 'You are an expert fiction writer. Write detailed scenes with lively dialogue.'},
+        {"role": "system", "content": system},
+        {"role": "user", "content": (
+            f"Based on this book specification:\n\"\"\"{book_spec}\"\"\"\n\n"
+            "Break each of the 4 chapters in Act 1 into scenes (number depends on how packed a chapter is), give scene specifications for each.\n"
+            f"Here is the by-chapter plot summary for the act in a {form}:\n\"\"\"{text_act}\"\"\"\n\n"
+            f"Scene spec format:\n\"\"\"{scene_spec_format}\"\"\"\n"
+            "Ensure each scene directly relates to the main premise and theme.")}
+    ]
+    return messages
+
+
+def scene_messages(scene, sc_num, ch_num, text_plan, form, book_spec):  # Added book_spec parameter
+    messages = [
+        {"role": "system", "content": 'You are an expert fiction writer. Write detailed scenes with lively dialogue that stay true to the original premise and theme.'},
         {"role": "user",
-            "content": f"Write a long detailed scene for a {form} for scene {sc_num} in chapter {ch_num} based on the information. "
-            "Be creative, explore interesting characters and unusual settings. Do NOT use foreshadowing.\n"
-            f"Here is the scene specification:\n\"\"\"{scene}\"\"\"\n\nHere is the overall plot:\n\"\"\"{text_plan}\"\"\""},
+            "content": (
+                f"Write a long detailed scene for a {form} for scene {sc_num} in chapter {ch_num} based on this specification:\n"
+                f"\"\"\"{book_spec}\"\"\"\n\n"
+                "Scene details:\n"
+                f"\"\"\"{scene}\"\"\"\n\n"
+                f"Overall plot:\n\"\"\"{text_plan}\"\"\"\n\n"
+                "Be creative but ensure the scene directly connects to the main premise and theme. "
+                "Maintain consistency with previous chapters and the overall story arc. "
+                "Do NOT use foreshadowing.")},
         {"role": "assistant", "content": f"\nChapter {ch_num}, Scene {sc_num}\n"},
     ]
     return messages

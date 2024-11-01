@@ -115,3 +115,38 @@ def scene_messages(scene, sc_num, ch_num, text_plan, form, book_spec):  # Added 
         {"role": "assistant", "content": f"\nChapter {ch_num}, Scene {sc_num}\n"},
     ]
     return messages
+
+def scene_summary_messages(scene_content, sc_num, ch_num):
+    messages = [
+        {"role": "system", "content": "Create concise, factual summaries of story scenes focusing on key events, character developments, and plot points."},
+        {"role": "user", "content": (
+            f"Create a brief summary (max 100 words) of the following scene from Chapter {ch_num}, Scene {sc_num}. "
+            "Focus on key events, character developments, and details important for story continuity:\n"
+            f"\"\"\"{scene_content}\"\"\""
+        )}
+    ]
+    return messages
+
+def scene_messages_with_history(scene, sc_num, ch_num, text_plan, form, book_spec, previous_summaries):
+    summary_text = "\n".join([
+        f"Chapter {summary['chapter']}, Scene {summary['scene']}: {summary['content']}"
+        for summary in previous_summaries
+    ])
+    
+    messages = [
+        {"role": "system", "content": 'You are an expert fiction writer. Write detailed scenes with lively dialogue that stay true to the original premise and theme.'},
+        {"role": "user",
+            "content": (
+                f"Write a long detailed scene for a {form} for scene {sc_num} in chapter {ch_num}.\n\n"
+                f"Book specification:\n\"\"\"{book_spec}\"\"\"\n\n"
+                "Scene details:\n"
+                f"\"\"\"{scene}\"\"\"\n\n"
+                f"Overall plot:\n\"\"\"{text_plan}\"\"\"\n\n"
+                f"Previous scenes summary:\n\"\"\"{summary_text}\"\"\"\n\n"
+                "Write a scene that maintains perfect continuity with previous events. "
+                "Be creative but ensure the scene directly connects to the main premise and theme. "
+                "Maintain consistency with previous chapters and the overall story arc. "
+                "Do NOT use foreshadowing.")},
+        {"role": "assistant", "content": f"\nChapter {ch_num}, Scene {sc_num}\n"},
+    ]
+    return messages

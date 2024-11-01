@@ -111,8 +111,26 @@ def _query_chat_openai(endpoint, messages, retries=3,
                 timeout=request_timeout
             )
             
-            response_json = response.json()
-            print(f"\n========== Received response from OpenAI: >>\n{json.dumps(response_json, indent=2)}")
+            # Print raw response for debugging
+            print(f"\n========== Received raw response from OpenAI: >>\nStatus: {response.status_code}\nContent: {response.text}")
+            sys.stdout.flush()
+            
+            # Check response status
+            if response.status_code != 200:
+                raise Exception(f"OpenAI API returned status code {response.status_code}: {response.text}")
+            
+            # Check if response content exists
+            if not response.text:
+                raise Exception("Empty response received from OpenAI API")
+            
+            try:
+                response_json = response.json()
+            except json.JSONDecodeError as e:
+                print(f"Failed to decode JSON: {str(e)}")
+                print(f"Raw response: {response.text}")
+                raise
+            
+            print(f"\n========== Parsed response from OpenAI: >>\n{json.dumps(response_json, indent=2)}")
             sys.stdout.flush()
             
             # Check for API errors
@@ -131,9 +149,9 @@ def _query_chat_openai(endpoint, messages, retries=3,
                 
             return generated_text
             
-        except Exception:
+        except Exception as e:
             traceback.print_exc()
-            print('Error occurred, retrying...')
+            print(f'Error occurred: {str(e)}, retrying...')
             retries -= 1
             time.sleep(5)
     
@@ -227,6 +245,18 @@ class StoryAgent:
         self.backend_uri = backend_uri
         self.n_crop_previous = n_crop_previous
         self.request_timeout = request_timeout
+        self.scene_summaries = []  # Add this line
+        
+    def summarize_scene(self, scene_content, sc_num, ch_num):
+        """Generate a summary for a scene"""
+        messages = self.prompt_engine.scene_summary_messages(
+            scene_content, sc_num, ch_num)
+        summary = self.query_chat(messages)
+        return {
+            'chapter': ch_num,
+            'scene': sc_num,
+            'content': summary.strip()
+        }
 
     def query_chat(self, messages, retries=3):
         if self.backend == "hf":
@@ -485,17 +515,21 @@ class StoryAgent:
     
 
     def write_a_scene(
-            self, scene, sc_num, ch_num, plan, book_spec,  # Added book_spec parameter
-            previous_scene=None):
+            self, scene, sc_num, ch_num, plan, book_spec,
+            previous_scene=None):  # previous_scene parameter can be removed if not needed
         text_plan = Plan.plan_2_str(plan)
-        messages = self.prompt_engine.scene_messages(
-            scene, sc_num, ch_num, text_plan, self.form, book_spec)  # Added book_spec
-        if previous_scene:
-            previous_scene = utils.keep_last_n_words(previous_scene,
-                                                        n=self.n_crop_previous)
-            messages[1]['content'] += f'{self.prompt_engine.prev_scene_intro}\"\"\"{previous_scene}\"\"\"'
+        messages = self.prompt_engine.scene_messages_with_history(
+            scene, sc_num, ch_num, text_plan, self.form, book_spec,
+            self.scene_summaries
+        )
+        
         generated_scene = self.query_chat(messages)
         generated_scene = self.prepare_scene_text(generated_scene)
+        
+        # Create and store summary
+        scene_summary = self.summarize_scene(generated_scene, sc_num, ch_num)
+        self.scene_summaries.append(scene_summary)
+        
         return messages, generated_scene
 
 
@@ -516,11 +550,14 @@ class StoryAgent:
 
     def generate_story(self, topic):
         """Example pipeline for a novel creation"""
+        # Reset summaries at the start of each new story
+        self.scene_summaries = []
+    
         _, book_spec = self.init_book_spec(topic)
         _, book_spec = self.enhance_book_spec(book_spec)
         _, plan = self.create_plot_chapters(book_spec)
         _, plan = self.enhance_plot_chapters(book_spec, plan)
-        _, plan = self.split_chapters_into_scenes(plan, book_spec)  # Added book_spec
+        _, plan = self.split_chapters_into_scenes(plan, book_spec)
 
         form_text = []
         # Modified to handle only one act with 4 chapters
@@ -530,11 +567,40 @@ class StoryAgent:
                 chapter = act['chapter_scenes'][ch_num]
                 sc_num = 1
                 for scene in chapter:
-                    previous_scene = form_text[-1] if form_text else None
+                    #print(f"\n{'='*80}")
+                    print(f"Generating Chapter {ch_num}, Scene {sc_num}...")
+                    #print('='*80)
+                    sys.stdout.flush()
+                
                     _, generated_scene = self.write_a_scene(
-                        scene, sc_num, ch_num, plan,
-                        book_spec,  # Added book_spec
-                        previous_scene=previous_scene)
+                        scene, sc_num, ch_num, plan, book_spec)
                     form_text.append(generated_scene)
+                
+                    # Print only the latest scene summary
+                    #print(f"\n{'='*80}")
+                    print(f"Summary of Chapter {ch_num}, Scene {sc_num}:")
+                    #print('='*80)
+                    latest_summary = self.scene_summaries[-1]['content']
+                    print(latest_summary)
+                    print("\n")
+                    sys.stdout.flush()
+                
                     sc_num += 1
         return form_text
+
+    def save_summaries(self, filepath):
+        """Save scene summaries to a JSON file"""
+        with open(filepath, 'w') as f:
+            json.dump(self.scene_summaries, f, indent=2)
+
+    def load_summaries(self, filepath):
+        """Load scene summaries from a JSON file"""
+        with open(filepath, 'r') as f:
+            self.scene_summaries = json.load(f)
+            
+    def get_story_progress(self):
+        """Get a formatted string of all scene summaries"""
+        return "\n".join([
+            f"Chapter {summary['chapter']}, Scene {summary['scene']}:\n{summary['content']}\n"
+            for summary in self.scene_summaries
+        ])

@@ -1,9 +1,9 @@
 from storytelling_agent import StoryAgent
 from datetime import datetime
 
-backend_uri = 'http://localhost:5000'
-writer = StoryAgent(backend_uri, form='short novel', backend="openai", max_tokens=4096, request_timeout=500)
-novel_scenes = writer.generate_story('')
+backend_uri = 'https://t0qycop7o4vpum-5000.proxy.runpod.net'
+writer = StoryAgent(backend_uri, form='book for children aged 3 to 5', backend="openai", max_tokens=4096, request_timeout=500)
+novel_scenes = writer.generate_story('A small dwarf that wanted to learn how to fly with the help of the animals of the forest and some creative ideas')
 
 # Convert list of scenes to a single string
 story_text = '\n\n'.join(novel_scenes) if isinstance(novel_scenes, list) else str(novel_scenes)
